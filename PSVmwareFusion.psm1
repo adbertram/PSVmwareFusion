@@ -62,8 +62,8 @@ function Invoke-VMRun {
     }
 }
 
-# Function to get demo VMs and their status
-function Get-DemoVm {
+# Function to get Fusion VMs and their status
+function Get-FusionVm {
     param(
         [Parameter(Mandatory = $false)]
         [Alias("Name")]
@@ -178,10 +178,10 @@ function Get-DemoVm {
     return $result
 }
 
-function Wait-DemoVmReady {
+function Wait-FusionVmReady {
     param(
         [Parameter(Mandatory, ValueFromPipeline)]
-        [PSCustomObject]$DemoVM,
+        [PSCustomObject]$FusionVM,
 
         [Parameter()]
         [ValidateNotNullOrEmpty()]
@@ -198,7 +198,7 @@ function Wait-DemoVmReady {
     Write-Verbose "Waiting for VM '$VMName' to be fully ready..."
     
     $timeWaited = 0
-    while ((Get-DemoVm -Name $DemoVm.Name).Status -ne "Running" -and $timeWaited -lt $TimeoutSeconds) {
+    while ((Get-FusionVm -Name $FusionVm.Name).Status -ne "Running" -and $timeWaited -lt $TimeoutSeconds) {
         try {
             Write-Verbose "Waiting for VM to start... (attempt $Attempt/$MaxAttempts)"
             Start-Sleep -Seconds 5
@@ -216,7 +216,7 @@ function Wait-DemoVmReady {
     # Now check if VMware Tools is running
     $Attempt = 1
     
-    while ((Invoke-VMRun -Arguments @("checkToolsState", $VMPath)) -ne "running") {
+    while ((Invoke-VMRun -Arguments @("checkToolsState", $FusionVM.Path)) -ne "running") {
         try {
             Write-Verbose "Waiting for VMware Tools... (attempt $Attempt/$MaxAttempts)"
             Start-Sleep -Seconds 5
@@ -234,19 +234,19 @@ function Wait-DemoVmReady {
 }
 
 # Function to start a VM
-function Start-DemoVm {
+function Start-FusionVm {
     param(
         [Parameter(Mandatory, ValueFromPipeline)]
-        [PSCustomObject]$DemoVM
+        [PSCustomObject]$FusionVM
     )
     
     process {
-        $VMPath = $DemoVM.Path
-    $VMName = $DemoVM.Name
+        $VMPath = $FusionVM.Path
+    $VMName = $FusionVM.Name
     
     # Check if VM is already running
     try {
-        $IsRunning = $DemoVM.Status -eq "Running"
+        $IsRunning = $FusionVM.Status -eq "Running"
         
         if ($IsRunning) {
             Write-Verbose "VM '$VMName' is already running"
@@ -269,23 +269,23 @@ function Start-DemoVm {
     Write-Verbose "VM start command successful, waiting for VM to be ready..."
     
     # Wait for VM to be ready
-    Wait-DemoVmReady $DemoVM
+    Wait-FusionVmReady $FusionVM
     }
 }
 
 # Function to stop a VM
-function Stop-DemoVm {
+function Stop-FusionVm {
     param(
         [Parameter(Mandatory, ValueFromPipeline)]
-        [PSCustomObject]$DemoVM
+        [PSCustomObject]$FusionVM
     )
     
     process {
-        $VMPath = $DemoVM.Path
-    $VMName = $DemoVM.Name
+        $VMPath = $FusionVM.Path
+    $VMName = $FusionVM.Name
     
     try {
-        $IsRunning = $DemoVM.Status -eq "Running"
+        $IsRunning = $FusionVM.Status -eq "Running"
         
         if (-not $IsRunning) {
             Write-Verbose "VM '$VMName' is not running"
@@ -306,10 +306,10 @@ function Stop-DemoVm {
 }
 
 # Function to list snapshots for a VM
-function Get-DemoVmSnapshot {
+function Get-FusionVmSnapshot {
     param(
         [Parameter(Mandatory, ValueFromPipeline)]
-        [PSCustomObject]$DemoVM,
+        [PSCustomObject]$FusionVM,
 
         [Parameter()]
         [ValidateNotNullOrEmpty()]
@@ -317,8 +317,8 @@ function Get-DemoVmSnapshot {
     )
     
     process {
-        $VMPath = $DemoVM.Path
-    $VMName = $DemoVM.Name
+        $VMPath = $FusionVM.Path
+    $VMName = $FusionVM.Name
     $VMDir = Split-Path $VMPath -Parent
     
     Write-Verbose "Snapshots for VM: $VMName"
@@ -396,10 +396,10 @@ function Get-DemoVmSnapshot {
 }
 
 # Function to take a snapshot of a VM
-function New-DemoVmSnapshot {
+function New-FusionVmSnapshot {
     param(
         [Parameter(Mandatory, ValueFromPipeline)]
-        [PSCustomObject]$DemoVM,
+        [PSCustomObject]$FusionVM,
         [Parameter(Mandatory)]
         [string]$Name,
         [string]$Description,
@@ -407,17 +407,17 @@ function New-DemoVmSnapshot {
     )
     
     process {
-        $VMPath = $DemoVM.Path
-    $VMName = $DemoVM.Name
+        $VMPath = $FusionVM.Path
+    $VMName = $FusionVM.Name
     
     # Handle VM state based on Shutdown parameter
     $vmStarted = $false
-    $vmWasRunning = $DemoVM.Status -eq "Running"
-    Write-Verbose "VM Status: $($DemoVM.Status)"
+    $vmWasRunning = $FusionVM.Status -eq "Running"
+    Write-Verbose "VM Status: $($FusionVM.Status)"
     
     if ($Shutdown -and $vmWasRunning) {
         Write-Verbose "Shutdown parameter specified - stopping VM before snapshot..."
-        Stop-DemoVm $DemoVM
+        Stop-FusionVm $FusionVM
         Write-Verbose "VM stopped successfully"
     } elseif ($vmWasRunning) {
         Write-Verbose "VM is already running - taking snapshot while running"
@@ -452,14 +452,14 @@ function New-DemoVmSnapshot {
         # Restore VM to original state if we changed it
         if ($Shutdown -and $vmWasRunning) {
             Write-Verbose "Restarting VM (was stopped for snapshot)..."
-            Start-DemoVm $DemoVM
+            Start-FusionVm $FusionVM
         }
     }
     }
 }
 
 # Function to restore a VM to a snapshot
-function Restore-DemoVmSnapshot {
+function Restore-FusionVmSnapshot {
     param(
         [Parameter(Mandatory, ValueFromPipeline)]
         [PSCustomObject]$Snapshot
@@ -471,10 +471,10 @@ function Restore-DemoVmSnapshot {
     
     $vMStarted = $false
     # Get current VM status
-    $DemoVM = Get-DemoVm -VMName $VMName
-    if ($DemoVM.Status -ne "Running") {
+    $FusionVM = Get-FusionVm -VMName $VMName
+    if ($FusionVM.Status -ne "Running") {
         Write-Verbose "Starting VM to check snapshots..."
-        Start-DemoVm $DemoVM
+        Start-FusionVm $FusionVM
         $vMStarted = $true
     }
     
@@ -496,14 +496,14 @@ function Restore-DemoVmSnapshot {
         throw "Failed to restore snapshot: $($_.Exception.Message)"
     } finally {
         if ($vMStarted) {
-            Stop-DemoVm $DemoVM
+            Stop-FusionVm $FusionVM
         }
     }
     }
 }
 
 # Function to delete a VM snapshot
-function Remove-DemoVmSnapshot {
+function Remove-FusionVmSnapshot {
     param(
         [Parameter(Mandatory, ValueFromPipeline)]
         [PSCustomObject]$Snapshot

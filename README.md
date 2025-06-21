@@ -23,62 +23,62 @@ Import-Module ./PSVmwareFusion/PSVmwareFusion.psd1
 ## Functions
 
 ### VM Management
-- **Get-DemoVm** - List and filter virtual machines
-- **Start-DemoVm** - Start virtual machines 
-- **Stop-DemoVm** - Stop virtual machines
-- **Wait-DemoVmReady** - Wait for VM to be fully ready with VMware Tools
+- **Get-FusionVm** - List and filter virtual machines
+- **Start-FusionVm** - Start virtual machines 
+- **Stop-FusionVm** - Stop virtual machines
+- **Wait-FusionVmReady** - Wait for VM to be fully ready with VMware Tools
 
 ### Snapshot Management
-- **Get-DemoVmSnapshot** - List VM snapshots with size and file information
-- **New-DemoVmSnapshot** - Create new VM snapshots
-- **Restore-DemoVmSnapshot** - Restore VMs to specific snapshots
-- **Remove-DemoVmSnapshot** - Delete VM snapshots
+- **Get-FusionVmSnapshot** - List VM snapshots with size and file information
+- **New-FusionVmSnapshot** - Create new VM snapshots
+- **Restore-FusionVmSnapshot** - Restore VMs to specific snapshots
+- **Remove-FusionVmSnapshot** - Delete VM snapshots
 
 ## Usage Examples
 
 ### Basic VM Operations
 ```powershell
 # List all VMs
-Get-DemoVm
+Get-FusionVm
 
 # Get specific VM
-Get-DemoVm -VMName "MyVM"
+Get-FusionVm -VMName "MyVM"
 
 # Start a VM
-Get-DemoVm -VMName "MyVM" | Start-DemoVm
+Get-FusionVm -VMName "MyVM" | Start-FusionVm
 
 # Stop a VM  
-Get-DemoVm -VMName "MyVM" | Stop-DemoVm
+Get-FusionVm -VMName "MyVM" | Stop-FusionVm
 ```
 
 ### Snapshot Operations
 ```powershell
 # List all snapshots for a VM
-Get-DemoVm -VMName "MyVM" | Get-DemoVmSnapshot
+Get-FusionVm -VMName "MyVM" | Get-FusionVmSnapshot
 
 # Create a snapshot
-Get-DemoVm -VMName "MyVM" | New-DemoVmSnapshot -Name "BeforeUpdate" -Description "Pre-update state"
+Get-FusionVm -VMName "MyVM" | New-FusionVmSnapshot -Name "BeforeUpdate" -Description "Pre-update state"
 
 # Create a snapshot after stopping the VM (faster)
-Get-DemoVm -VMName "MyVM" | New-DemoVmSnapshot -Name "CleanState" -Shutdown
+Get-FusionVm -VMName "MyVM" | New-FusionVmSnapshot -Name "CleanState" -Shutdown
 
 # Restore to a snapshot
-Get-DemoVm -VMName "MyVM" | Get-DemoVmSnapshot -Name "BeforeUpdate" | Restore-DemoVmSnapshot
+Get-FusionVm -VMName "MyVM" | Get-FusionVmSnapshot -Name "BeforeUpdate" | Restore-FusionVmSnapshot
 
 # Remove a snapshot
-Get-DemoVm -VMName "MyVM" | Get-DemoVmSnapshot -Name "OldSnapshot" | Remove-DemoVmSnapshot
+Get-FusionVm -VMName "MyVM" | Get-FusionVmSnapshot -Name "OldSnapshot" | Remove-FusionVmSnapshot
 ```
 
 ### Advanced Pipeline Operations
 ```powershell
 # Start multiple VMs
-Get-DemoVm | Where-Object Status -eq "Stopped" | Start-DemoVm
+Get-FusionVm | Where-Object Status -eq "Stopped" | Start-FusionVm
 
 # Get snapshot information with sizes
-Get-DemoVm | Get-DemoVmSnapshot | Format-Table Name, VMName, Size, SizeBytes
+Get-FusionVm | Get-FusionVmSnapshot | Format-Table Name, VMName, Size, SizeBytes
 
 # Remove old snapshots
-Get-DemoVm | Get-DemoVmSnapshot | Where-Object Name -like "*old*" | Remove-DemoVmSnapshot
+Get-FusionVm | Get-FusionVmSnapshot | Where-Object Name -like "*old*" | Remove-FusionVmSnapshot
 ```
 
 ## Object Properties

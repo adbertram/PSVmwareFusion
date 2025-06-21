@@ -8,14 +8,14 @@
     Description = 'PowerShell module for managing VMware Fusion virtual machines on macOS'
     PowerShellVersion = '5.1'
     FunctionsToExport = @(
-        'Get-DemoVm',
-        'Start-DemoVm', 
-        'Stop-DemoVm',
-        'Wait-DemoVmReady',
-        'Get-DemoVmSnapshot',
-        'New-DemoVmSnapshot',
-        'Restore-DemoVmSnapshot',
-        'Remove-DemoVmSnapshot'
+        'Get-FusionVm',
+        'Start-FusionVm', 
+        'Stop-FusionVm',
+        'Wait-FusionVmReady',
+        'Get-FusionVmSnapshot',
+        'New-FusionVmSnapshot',
+        'Restore-FusionVmSnapshot',
+        'Remove-FusionVmSnapshot'
     )
     CmdletsToExport = @()
     VariablesToExport = @()
