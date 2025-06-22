@@ -323,59 +323,7 @@ function Invoke-VMRun {
             throw $errorMsg
         }
         
-        # For runProgramInGuest commands, verify the process was created successfully
-        if ($Command -eq 'runProgramInGuest' -and $CommandParameters -and $CommandParameters.Count -gt 0) {
-            $programName = [System.IO.Path]::GetFileNameWithoutExtension($CommandParameters[0])
-            
-            # Only verify if we have guest credentials to check processes
-            if ($GuestCredential) {
-                Write-Verbose "Verifying process '$programName' was created successfully..."
-                
-                # Wait a moment for the process to start
-                Start-Sleep -Seconds 2
-                
-                try {
-                    # Check if the process is running in the guest
-                    $processCheckArgs = @()
-                    if ($HostType -and $HostType -ne 'fusion') {
-                        $processCheckArgs += @("-T", $HostType)
-                    } else {
-                        $processCheckArgs += @("-T", "fusion")
-                    }
-                    
-                    # Add guest credentials for process check
-                    $processCheckArgs += @("-gu", $GuestCredential.UserName)
-                    $plainGuestPassword = ConvertFrom-SecureStringToPlainText -SecureString $GuestCredential.Password
-                    $processCheckArgs += @("-gp", $plainGuestPassword)
-                    
-                    $processCheckArgs += @("listProcessesInGuest", $VMPath)
-                    
-                    $processList = & $vmRunPath @processCheckArgs 2>&1
-                    
-                    if ($LASTEXITCODE -eq 0 -and $processList) {
-                        # Check if our program is in the process list
-                        $processFound = $processList | Where-Object { $_ -like "*$programName*" }
-                        
-                        if ($processFound) {
-                            Write-Verbose "✓ Process '$programName' confirmed running in guest"
-                        } else {
-                            throw "Process '$programName' failed to start - not found in guest process list after launch attempt"
-                        }
-                    } else {
-                        throw "Could not verify process status - listProcessesInGuest command failed"
-                    }
-                } catch {
-                    # Re-throw process verification failures, but handle other exceptions gracefully
-                    if ($_.Exception.Message -like "*failed to start*" -or $_.Exception.Message -like "*Could not verify process status - listProcessesInGuest*") {
-                        throw
-                    } else {
-                        Write-Verbose "Could not verify process status due to unexpected error: $($_.Exception.Message)"
-                    }
-                }
-            } else {
-                Write-Verbose "Process verification skipped (no guest credentials available)"
-            }
-        }
+        # Note: Process verification disabled for better compatibility with short-running commands like PowerShell scripts
         
         $output
         
@@ -990,11 +938,14 @@ function Invoke-FusionVMGuestPowerShellCommand {
     .PARAMETER Credential
     PSCredential object for VM guest authentication
     
-    .PARAMETER LogPath
-    Custom log file path on guest. If not specified, uses timestamp-based naming
+    .PARAMETER LogFilePath
+    Optional log file path on guest. If specified, all script/command output will be logged to this file
     
     .EXAMPLE
     Invoke-FusionVMGuestPowerShellCommand -FusionVM "TestVM" -Command "Get-Process"
+    
+    .EXAMPLE
+    Invoke-FusionVMGuestPowerShellCommand -FusionVM "TestVM" -Command "Get-Process" -LogFilePath "C:\Users\user\my-course-20240101.log"
     #>
     param(
         [Parameter(Mandatory, ValueFromPipeline)]
@@ -1007,7 +958,7 @@ function Invoke-FusionVMGuestPowerShellCommand {
         [PSCredential]$Credential,
         
         [Parameter()]
-        [string]$LogPath
+        [string]$LogFilePath
     )
     
     process {
@@ -1023,96 +974,56 @@ function Invoke-FusionVMGuestPowerShellCommand {
         
         Write-Verbose "Executing PowerShell command on VM '$($FusionVM.Name)' as $($cred.UserName)..."
         
-        # Generate paths
-        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-        $guestLogFile = if ($LogPath) { 
-            $LogPath 
-        } else {
-            "C:/Users/$($cred.UserName)/vm_run_$timestamp.log"
-        }
-        
-        # Execute on guest
-        $plainPassword = ConvertFrom-SecureStringToPlainText -SecureString $cred.Password
-        
-        # Create a single output file
-        $outputFile = "C:\Users\$($cred.UserName)\vm_output_$timestamp.txt"
-        
-        # Robust command wrapper that captures all possible errors including syntax errors
-        $wrappedCommand = @"
-`$ErrorActionPreference = 'Continue'
-`$outputFile = '$outputFile'
-New-Item -Path `$outputFile -ItemType File -Force | Out-Null
+        # Wrap command with logging if LogFilePath is specified
+        $finalCommand = $Command
+        if ($LogFilePath) {
+            Write-Verbose "Logging output to: $LogFilePath"
+            # Create a wrapper script that logs all output
+            $finalCommand = @"
+# Create log file directory if it doesn't exist
+`$logDir = Split-Path '$LogFilePath' -Parent
+if (-not (Test-Path `$logDir)) {
+    New-Item -ItemType Directory -Path `$logDir -Force | Out-Null
+}
 
-# Wrap everything in a top-level try-catch to handle even syntax errors
-& {
-    trap {
-        "=== TRAPPED ERROR ===" | Add-Content -Path `$outputFile
-        "Error: `$(`$_.Exception.Message)" | Add-Content -Path `$outputFile
-        "Full Error: `$(`$_ | Out-String)" | Add-Content -Path `$outputFile
-        "=== END TRAPPED ERROR ===" | Add-Content -Path `$outputFile
-        exit 1
+# Log execution start
+"=== PowerShell Command Execution Started at `$(Get-Date) ===" | Out-File -FilePath '$LogFilePath' -Append -Encoding UTF8
+
+# Execute the command and capture all output
+try {
+    `$output = & {
+        $Command
+    } *>&1
+    
+    # Log the output
+    if (`$output) {
+        `$output | Out-File -FilePath '$LogFilePath' -Append -Encoding UTF8
     }
     
-    try {
-        "=== COMMAND EXECUTION STARTED ===" | Add-Content -Path `$outputFile
-        `$output = & { $Command } *>&1
-        `$exitCode = `$LASTEXITCODE
-        "=== COMMAND OUTPUT ===" | Add-Content -Path `$outputFile
-        if (`$output) { `$output | Add-Content -Path `$outputFile }
-        "=== EXIT CODE: `$exitCode ===" | Add-Content -Path `$outputFile
-        if (`$exitCode -ne 0) { exit `$exitCode }
-    } catch {
-        "=== CAUGHT EXCEPTION ===" | Add-Content -Path `$outputFile
-        "Error Type: `$(`$_.GetType().Name)" | Add-Content -Path `$outputFile
-        "Error Message: `$(`$_.Exception.Message)" | Add-Content -Path `$outputFile
-        if (`$_.InvocationInfo) {
-            "Script Line: `$(`$_.InvocationInfo.ScriptLineNumber)" | Add-Content -Path `$outputFile
-            "Position: `$(`$_.InvocationInfo.OffsetInLine)" | Add-Content -Path `$outputFile
-            "Line Content: `$(`$_.InvocationInfo.Line)" | Add-Content -Path `$outputFile
-        }
-        "Full Error Details:" | Add-Content -Path `$outputFile
-        (`$_ | Out-String) | Add-Content -Path `$outputFile
-        "=== END CAUGHT EXCEPTION ===" | Add-Content -Path `$outputFile
-        exit 1
+    # Also write to console
+    if (`$output) {
+        `$output
     }
+    
+    "=== Command completed successfully at `$(Get-Date) ===" | Out-File -FilePath '$LogFilePath' -Append -Encoding UTF8
+} catch {
+    "=== ERROR at `$(Get-Date): `$(`$_.Exception.Message) ===" | Out-File -FilePath '$LogFilePath' -Append -Encoding UTF8
+    throw
 }
 "@
-        
-        # Use the full path to PowerShell
-        $powershellPath = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
-        
-        $vmrunError = $null
-        try {
-            Invoke-VMRun -Command "runProgramInGuest" -VMPath $FusionVM.Path -GuestCredential $cred -CommandParameters @($powershellPath, "-Command", $wrappedCommand)
-        } catch {
-            $vmrunError = $_.Exception.Message
         }
         
-        # Always try to copy the output file back to host, even if vmrun failed
-        $localOutputFile = Join-Path $OUTPUT_DIR "$($FusionVM.Name)_output_$timestamp.txt"
+        # Base64 encode the PowerShell command to handle special characters and line breaks
+        $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($finalCommand))
+        
+        # Use the full path to PowerShell with non-interactive mode
+        $powershellPath = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        
         try {
-            Copy-FileFromFusionVmGuest -FusionVM $FusionVM -GuestFile $outputFile -LocalFile $localOutputFile -Credential $cred
-            
-            # Read and return the output directly
-            if (Test-Path $localOutputFile) {
-                $content = Get-Content $localOutputFile -Raw
-                Remove-Item $localOutputFile -ErrorAction SilentlyContinue
-                
-                if ($vmrunError) {
-                    # Include both the vmrun error and the detailed output from the guest
-                    throw "PowerShell execution failed on VM '$($FusionVM.Name)': $vmrunError`n`nDetailed output from guest:`n$content"
-                } else {
-                    Write-Output $content.Trim()
-                }
-            } elseif ($vmrunError) {
-                throw "Failed to execute PowerShell command on VM '$($FusionVM.Name)': $vmrunError"
-            }
+            $output = Invoke-VMRun -Command "runProgramInGuest" -VMPath $FusionVM.Path -GuestCredential $cred -CommandParameters @($powershellPath, "-NonInteractive", "-EncodedCommand", $encodedCommand)
+            Write-Output $output
         } catch {
-            if ($vmrunError) {
-                throw "PowerShell execution failed on VM '$($FusionVM.Name)': $vmrunError`n`nAdditional error retrieving output: $($_.Exception.Message)"
-            } else {
-                throw "Failed to retrieve output from VM '$($FusionVM.Name)': $($_.Exception.Message)"
-            }
+            throw "PowerShell execution failed on VM '$($FusionVM.Name)': $($_.Exception.Message)"
         }
     }
 }
@@ -1123,8 +1034,8 @@ function Invoke-FusionVMGuestScript {
     Executes a PowerShell script file on a remote VM.
     
     .DESCRIPTION
-    Reads a local PowerShell script file and executes it on a VMware Fusion VM
-    with comprehensive logging and error handling.
+    Copies a local PowerShell script file to the VM and executes it remotely.
+    This approach handles scripts of any size and complexity.
     
     .PARAMETER FusionVM
     VM object from Get-FusionVm or VM name string
@@ -1135,13 +1046,16 @@ function Invoke-FusionVMGuestScript {
     .PARAMETER Credential
     PSCredential object for VM guest authentication
     
+    .PARAMETER LogFilePath
+    Optional log file path on guest. If specified, all script output will be logged to this file
+    
     .EXAMPLE
     Set-FusionVMCredential -Credential (Get-Credential)
     Invoke-FusionVMGuestScript -FusionVM "TestVM" -ScriptPath "/Users/adam/Scripts/test.ps1"
     
     .EXAMPLE
     $cred = Get-Credential
-    Get-FusionVm -Name "TestVM" | Invoke-FusionVMGuestScript -ScriptPath "./deploy.ps1" -Credential $cred
+    Get-FusionVm -Name "TestVM" | Invoke-FusionVMGuestScript -ScriptPath "./deploy.ps1" -Credential $cred -LogFilePath "C:\Users\user\my-course-20240101.log"
     #>
     param(
         [Parameter(Mandatory, ValueFromPipeline)]
@@ -1151,7 +1065,10 @@ function Invoke-FusionVMGuestScript {
         [string]$ScriptPath,
         
         [Parameter()]
-        [PSCredential]$Credential
+        [PSCredential]$Credential,
+        
+        [Parameter()]
+        [string]$LogFilePath
     )
     
     process {
@@ -1160,13 +1077,51 @@ function Invoke-FusionVMGuestScript {
             throw "Script '$ScriptPath' not found"
         }
         
-        Write-Verbose "Reading script content from '$ScriptPath'..."
+        # Use provided credential or fall back to script scope credential
+        if (-not $Credential) {
+            if (-not $Script:FusionVMCredential) {
+                throw "No credential provided. Use -Credential parameter or call Set-FusionVMCredential first."
+            }
+            $Credential = $Script:FusionVMCredential
+        }
         
-        # Read the original script content
-        $scriptContent = Get-Content $ScriptPath -Raw
+        Write-Verbose "Copying script '$ScriptPath' to VM and executing..."
         
-        # Use Invoke-FusionVMGuestPowerShellCommand to execute the script content
-        Invoke-FusionVMGuestPowerShellCommand -FusionVM $FusionVM -Command $scriptContent -Credential $Credential
+        # Generate a unique temporary file name on the guest
+        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+        $scriptFileName = [System.IO.Path]::GetFileNameWithoutExtension($ScriptPath)
+        $guestScriptPath = "C:\Windows\Temp\${scriptFileName}_$timestamp.ps1"
+        
+        try {
+            # Copy the script to the VM
+            Copy-FileToFusionVMGuest -FusionVM $FusionVM -LocalFile $ScriptPath -GuestFile $guestScriptPath -Credential $Credential
+            
+            # Execute the script on the VM with execution policy bypass
+            $executeCommand = "Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force; & '$guestScriptPath'"
+            $output = Invoke-FusionVMGuestPowerShellCommand -FusionVM $FusionVM -Command $executeCommand -Credential $Credential -LogFilePath $LogFilePath
+            
+            # Clean up the temporary script file
+            try {
+                $cleanupCommand = "Remove-Item -Path '$guestScriptPath' -Force -ErrorAction SilentlyContinue"
+                Invoke-FusionVMGuestPowerShellCommand -FusionVM $FusionVM -Command $cleanupCommand -Credential $Credential
+                Write-Verbose "Cleaned up temporary script file: $guestScriptPath"
+            } catch {
+                Write-Verbose "Warning: Could not clean up temporary script file: $($_.Exception.Message)"
+            }
+            
+            return $output
+            
+        } catch {
+            # Try to clean up on error
+            try {
+                $cleanupCommand = "Remove-Item -Path '$guestScriptPath' -Force -ErrorAction SilentlyContinue"
+                Invoke-FusionVMGuestPowerShellCommand -FusionVM $FusionVM -Command $cleanupCommand -Credential $Credential
+            } catch {
+                # Ignore cleanup errors during error handling
+            }
+            
+            throw "Failed to execute script '$ScriptPath' on VM '$($FusionVM.Name)': $($_.Exception.Message)"
+        }
     }
 }
 
