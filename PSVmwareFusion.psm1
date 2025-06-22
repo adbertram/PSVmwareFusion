@@ -40,14 +40,8 @@ function Invoke-VMRun {
     .PARAMETER VixPassword
     The VIX password for vmrun operations (SecureString)
     
-    .PARAMETER GuestUser
-    The guest operating system username for guest operations
-    
-    .PARAMETER GuestPassword
-    The guest operating system password for guest operations (SecureString)
-    
     .PARAMETER GuestCredential
-    PSCredential object containing guest username and password (alternative to separate GuestUser/GuestPassword)
+    PSCredential object containing guest username and password for guest operations
     
     .PARAMETER Command
     The vmrun command to execute (e.g., 'start', 'stop', 'list', 'snapshot')
@@ -66,6 +60,7 @@ function Invoke-VMRun {
     
     .PARAMETER NoWait
     For runProgramInGuest command - do not wait for program to finish (useful for interactive programs)
+    
     
     .PARAMETER Wait
     For getGuestIPAddress command - wait until IP address is available
@@ -98,10 +93,11 @@ function Invoke-VMRun {
     Invoke-VMRun -Command "getGuestIPAddress" -VMPath $VMPath -Wait -GuestCredential $cred
     
     .EXAMPLE
-    Invoke-VMRun -Command "runProgramInGuest" -VMPath $VMPath -GuestUser "admin" -GuestPassword $securePass -CommandParameters @("cmd.exe", "/c", "dir") -Interactive
+    Invoke-VMRun -Command "runProgramInGuest" -VMPath $VMPath -GuestCredential $cred -CommandParameters @("cmd.exe", "/c", "dir") -Interactive
     
     .EXAMPLE
-    Invoke-VMRun -Command "runProgramInGuest" -VMPath $VMPath -GuestUser "admin" -GuestPassword $securePass -CommandParameters @("notepad.exe") -Interactive -NoWait
+    Invoke-VMRun -Command "runProgramInGuest" -VMPath $VMPath -GuestCredential $cred -CommandParameters @("notepad.exe") -Interactive -NoWait
+    
     
     .EXAMPLE
     Invoke-VMRun -Command "listSnapshots" -VMPath $VMPath -ShowTree
@@ -134,12 +130,6 @@ function Invoke-VMRun {
         
         [Parameter()]
         [SecureString]$VixPassword,
-        
-        [Parameter()]
-        [string]$GuestUser,
-        
-        [Parameter()]
-        [SecureString]$GuestPassword,
         
         [Parameter()]
         [PSCredential]$GuestCredential,
@@ -183,6 +173,7 @@ function Invoke-VMRun {
         
         [Parameter()]
         [switch]$NoWait,
+        
         
         [Parameter()]
         [switch]$Wait,
@@ -241,12 +232,6 @@ function Invoke-VMRun {
         $finalArguments += @("-gu", $GuestCredential.UserName)
         $plainGuestPassword = ConvertFrom-SecureStringToPlainText -SecureString $GuestCredential.Password
         $finalArguments += @("-gp", $plainGuestPassword)
-    } elseif ($GuestUser) {
-        $finalArguments += @("-gu", $GuestUser)
-        if ($GuestPassword) {
-            $plainGuestPassword = ConvertFrom-SecureStringToPlainText -SecureString $GuestPassword
-            $finalArguments += @("-gp", $plainGuestPassword)
-        }
     }
     
     # Add the command
@@ -263,7 +248,8 @@ function Invoke-VMRun {
         if ($Interactive) {
             $finalArguments += '-interactive'
         }
-        if ($ActiveWindow) {
+        if ($ActiveWindow -or $Interactive) {
+            # Use activeWindow when explicitly requested or when running interactively
             $finalArguments += '-activeWindow'
         }
     }
@@ -335,6 +321,60 @@ function Invoke-VMRun {
                 $errorMsg += ": $($output -join "`n")"
             }
             throw $errorMsg
+        }
+        
+        # For runProgramInGuest commands, verify the process was created successfully
+        if ($Command -eq 'runProgramInGuest' -and $CommandParameters -and $CommandParameters.Count -gt 0) {
+            $programName = [System.IO.Path]::GetFileNameWithoutExtension($CommandParameters[0])
+            
+            # Only verify if we have guest credentials to check processes
+            if ($GuestCredential) {
+                Write-Verbose "Verifying process '$programName' was created successfully..."
+                
+                # Wait a moment for the process to start
+                Start-Sleep -Seconds 2
+                
+                try {
+                    # Check if the process is running in the guest
+                    $processCheckArgs = @()
+                    if ($HostType -and $HostType -ne 'fusion') {
+                        $processCheckArgs += @("-T", $HostType)
+                    } else {
+                        $processCheckArgs += @("-T", "fusion")
+                    }
+                    
+                    # Add guest credentials for process check
+                    $processCheckArgs += @("-gu", $GuestCredential.UserName)
+                    $plainGuestPassword = ConvertFrom-SecureStringToPlainText -SecureString $GuestCredential.Password
+                    $processCheckArgs += @("-gp", $plainGuestPassword)
+                    
+                    $processCheckArgs += @("listProcessesInGuest", $VMPath)
+                    
+                    $processList = & $vmRunPath @processCheckArgs 2>&1
+                    
+                    if ($LASTEXITCODE -eq 0 -and $processList) {
+                        # Check if our program is in the process list
+                        $processFound = $processList | Where-Object { $_ -like "*$programName*" }
+                        
+                        if ($processFound) {
+                            Write-Verbose "✓ Process '$programName' confirmed running in guest"
+                        } else {
+                            throw "Process '$programName' failed to start - not found in guest process list after launch attempt"
+                        }
+                    } else {
+                        throw "Could not verify process status - listProcessesInGuest command failed"
+                    }
+                } catch {
+                    # Re-throw process verification failures, but handle other exceptions gracefully
+                    if ($_.Exception.Message -like "*failed to start*" -or $_.Exception.Message -like "*Could not verify process status - listProcessesInGuest*") {
+                        throw
+                    } else {
+                        Write-Verbose "Could not verify process status due to unexpected error: $($_.Exception.Message)"
+                    }
+                }
+            } else {
+                Write-Verbose "Process verification skipped (no guest credentials available)"
+            }
         }
         
         $output
@@ -1043,7 +1083,7 @@ New-Item -Path `$outputFile -ItemType File -Force | Out-Null
         
         $vmrunError = $null
         try {
-            Invoke-VMRun -Command "runProgramInGuest" -VMPath $FusionVM.Path -GuestUser $cred.UserName -GuestPassword $cred.Password -CommandParameters @($powershellPath, "-Command", $wrappedCommand)
+            Invoke-VMRun -Command "runProgramInGuest" -VMPath $FusionVM.Path -GuestCredential $cred -CommandParameters @($powershellPath, "-Command", $wrappedCommand)
         } catch {
             $vmrunError = $_.Exception.Message
         }
@@ -1201,17 +1241,10 @@ function Copy-FileToFusionVMGuest {
             $Credential = $Script:FusionVMCredential
         }
         
-        # Extract username and password from credential
-        $Username = $Credential.UserName
-        $Password = $Credential.Password
-        
         Write-Verbose "Copying file '$LocalFile' to VM '$($vmObject.Name)' at '$GuestFile'..."
         
-        # Convert SecureString to plain text for vmrun (required by VMware API)
-        $PlainPassword = ConvertFrom-SecureStringToPlainText -SecureString $Password
-        
         try {
-            Invoke-VMRun -Command "copyFileFromHostToGuest" -VMPath $vmObject.Path -GuestUser $Username -GuestPassword $Password -CommandParameters @($LocalFile, $GuestFile)
+            Invoke-VMRun -Command "copyFileFromHostToGuest" -VMPath $vmObject.Path -GuestCredential $Credential -CommandParameters @($LocalFile, $GuestFile)
             
             Write-Verbose "File copied successfully to '$GuestFile'"
             
@@ -1386,10 +1419,6 @@ function Copy-FileFromFusionVmGuest {
             $Credential = $Script:FusionVMCredential
         }
         
-        # Extract username and password from credential
-        $Username = $Credential.UserName
-        $Password = $Credential.Password
-        
         Write-Verbose "Copying file '$GuestFile' from VM '$($vmObject.Name)' to '$LocalFile'..."
         
         # Create the directory for the local file if it doesn't exist
@@ -1398,11 +1427,8 @@ function Copy-FileFromFusionVmGuest {
             New-Item -ItemType Directory -Path $localDir -Force | Out-Null
         }
         
-        # Convert SecureString to plain text for vmrun (required by VMware API)
-        $PlainPassword = ConvertFrom-SecureStringToPlainText -SecureString $Password
-        
         try {
-            Invoke-VMRun -Command "copyFileFromGuestToHost" -VMPath $vmObject.Path -GuestUser $Username -GuestPassword $Password -CommandParameters @($GuestFile, $LocalFile)
+            Invoke-VMRun -Command "copyFileFromGuestToHost" -VMPath $vmObject.Path -GuestCredential $Credential -CommandParameters @($GuestFile, $LocalFile)
             
             Write-Verbose "File copied successfully to '$LocalFile'"
             
