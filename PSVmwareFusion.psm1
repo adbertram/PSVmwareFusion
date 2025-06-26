@@ -1013,17 +1013,53 @@ try {
 "@
         }
         
-        # Base64 encode the PowerShell command to handle special characters and line breaks
-        $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($finalCommand))
+        # Generate a unique temporary file name on the guest
+        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss_fff"
+        $guestScriptPath = "C:\Windows\Temp\PSCommand_$timestamp.ps1"
         
-        # Use the full path to PowerShell with non-interactive mode
-        $powershellPath = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        # Create a temporary local script file
+        $localTempScript = [System.IO.Path]::GetTempFileName() + ".ps1"
         
         try {
-            $output = Invoke-VMRun -Command "runProgramInGuest" -VMPath $FusionVM.Path -GuestCredential $cred -CommandParameters @($powershellPath, "-NonInteractive", "-EncodedCommand", $encodedCommand)
+            # Write the command to the temporary local script file
+            $finalCommand | Out-File -FilePath $localTempScript -Encoding UTF8
+            Write-Verbose "Created temporary script file: $localTempScript"
+            
+            # Copy the script to the VM
+            Copy-FileToFusionVMGuest -FusionVM $FusionVM -LocalFile $localTempScript -GuestFile $guestScriptPath -Credential $cred
+            Write-Verbose "Copied script to VM at: $guestScriptPath"
+            
+            # Execute the script on the VM with execution policy bypass
+            $powershellPath = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+            $output = Invoke-VMRun -Command "runProgramInGuest" -VMPath $FusionVM.Path -GuestCredential $cred -CommandParameters @($powershellPath, "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", $guestScriptPath)
+            
+            # Clean up the temporary script file on the VM
+            try {
+                $cleanupCommand = "Remove-Item -Path '$guestScriptPath' -Force -ErrorAction SilentlyContinue"
+                $cleanupScriptPath = "C:\Windows\Temp\Cleanup_$timestamp.ps1"
+                $cleanupCommand | Out-File -FilePath $localTempScript -Encoding UTF8
+                Copy-FileToFusionVMGuest -FusionVM $FusionVM -LocalFile $localTempScript -GuestFile $cleanupScriptPath -Credential $cred
+                Invoke-VMRun -Command "runProgramInGuest" -VMPath $FusionVM.Path -GuestCredential $cred -CommandParameters @($powershellPath, "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", $cleanupScriptPath)
+                # Clean up the cleanup script too
+                $finalCleanup = "Remove-Item -Path '$cleanupScriptPath' -Force -ErrorAction SilentlyContinue"
+                $finalCleanup | Out-File -FilePath $localTempScript -Encoding UTF8
+                Copy-FileToFusionVMGuest -FusionVM $FusionVM -LocalFile $localTempScript -GuestFile "C:\Windows\Temp\FinalCleanup_$timestamp.ps1" -Credential $cred
+                Invoke-VMRun -Command "runProgramInGuest" -VMPath $FusionVM.Path -GuestCredential $cred -CommandParameters @($powershellPath, "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "C:\Windows\Temp\FinalCleanup_$timestamp.ps1")
+                Write-Verbose "Cleaned up temporary script files on VM"
+            } catch {
+                Write-Verbose "Warning: Could not clean up temporary script files on VM: $($_.Exception.Message)"
+            }
+            
             Write-Output $output
+            
         } catch {
             throw "PowerShell execution failed on VM '$($FusionVM.Name)': $($_.Exception.Message)"
+        } finally {
+            # Clean up the local temporary script file
+            if (Test-Path $localTempScript) {
+                Remove-Item $localTempScript -Force -ErrorAction SilentlyContinue
+                Write-Verbose "Cleaned up local temporary script file: $localTempScript"
+            }
         }
     }
 }
