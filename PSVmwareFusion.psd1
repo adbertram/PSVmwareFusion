@@ -15,7 +15,9 @@
         'Get-FusionVmSnapshot',
         'New-FusionVmSnapshot',
         'Restore-FusionVmSnapshot',
-        'Remove-FusionVmSnapshot'
+        'Remove-FusionVmSnapshot',
+        'Invoke-FusionVMGuestPowerShellCommand',
+        'Set-FusionVMCredential'
     )
     CmdletsToExport = @()
     VariablesToExport = @()

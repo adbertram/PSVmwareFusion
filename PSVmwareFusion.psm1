@@ -938,11 +938,14 @@ function Invoke-FusionVMGuestPowerShellCommand {
     .PARAMETER Credential
     PSCredential object for VM guest authentication
     
-    .PARAMETER LogFilePath
-    Optional log file path on guest. If specified, all script/command output will be logged to this file
+    .PARAMETER UsePwsh
+    Use PowerShell 7+ (pwsh.exe) instead of Windows PowerShell (powershell.exe)
     
     .EXAMPLE
     Invoke-FusionVMGuestPowerShellCommand -FusionVM "TestVM" -Command "Get-Process"
+    
+    .EXAMPLE
+    Invoke-FusionVMGuestPowerShellCommand -FusionVM "TestVM" -Command "Get-Process" -UsePwsh
     
     .EXAMPLE
     Invoke-FusionVMGuestPowerShellCommand -FusionVM "TestVM" -Command "Get-Process" -LogFilePath "C:\Users\user\my-course-20240101.log"
@@ -958,7 +961,10 @@ function Invoke-FusionVMGuestPowerShellCommand {
         [PSCredential]$Credential,
         
         [Parameter()]
-        [string]$LogFilePath
+        [string]$LogFilePath,
+        
+        [Parameter()]
+        [switch]$UsePwsh
     )
     
     process {
@@ -972,23 +978,25 @@ function Invoke-FusionVMGuestPowerShellCommand {
             throw "No credential provided. Use -Credential parameter or call Set-FusionVMCredential first."
         }
         
-        Write-Verbose "Executing PowerShell command on VM '$($FusionVM.Name)' as $($cred.UserName)..."
+        # Determine PowerShell executable path
+        $powershellPath = if ($UsePwsh) {
+            "C:\Program Files\PowerShell\7\pwsh.exe"
+        } else {
+            "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        }
+        
+        $psType = if ($UsePwsh) { "PowerShell 7+" } else { "Windows PowerShell" }
+        Write-Verbose "Executing $psType command on VM '$($FusionVM.Name)' as $($cred.UserName)..."
         
         # Wrap command with logging if LogFilePath is specified
         $finalCommand = $Command
-        if ($LogFilePath) {
-            Write-Verbose "Logging output to: $LogFilePath"
-            # Create a wrapper script that logs all output
-            $finalCommand = @"
-# Create log file directory if it doesn't exist
-`$logDir = Split-Path '$LogFilePath' -Parent
-if (-not (Test-Path `$logDir)) {
-    New-Item -ItemType Directory -Path `$logDir -Force | Out-Null
-}
 
-# Log execution start
-"=== PowerShell Command Execution Started at `$(Get-Date) ===" | Out-File -FilePath '$LogFilePath' -Append -Encoding UTF8
+        # Create a temporary log file path on the guest
+        $guestLogPath = "C:\Windows\Temp\PSOutput_$(Get-Date -Format 'yyyyMMdd_HHmmss_fff').log"
 
+        Write-Verbose "Logging output to guest file: $guestLogPath"
+        # Create a wrapper script that logs all output
+        $finalCommand = @"
 # Execute the command and capture all output
 try {
     `$output = & {
@@ -997,21 +1005,17 @@ try {
     
     # Log the output
     if (`$output) {
-        `$output | Out-File -FilePath '$LogFilePath' -Append -Encoding UTF8
+        `$output | Out-File -FilePath '$guestLogPath' -Encoding UTF8
     }
     
-    # Also write to console
+    # Also write to console (though vmrun won't capture it)
     if (`$output) {
         `$output
-    }
-    
-    "=== Command completed successfully at `$(Get-Date) ===" | Out-File -FilePath '$LogFilePath' -Append -Encoding UTF8
+    }    
 } catch {
-    "=== ERROR at `$(Get-Date): `$(`$_.Exception.Message) ===" | Out-File -FilePath '$LogFilePath' -Append -Encoding UTF8
-    throw
+    "ERROR: `$(`$_.Exception.Message)" | Out-File -FilePath '$guestLogPath' -Append -Encoding UTF8
 }
 "@
-        }
         
         # Generate a unique temporary file name on the guest
         $timestamp = Get-Date -Format "yyyyMMdd_HHmmss_fff"
@@ -1030,7 +1034,6 @@ try {
             Write-Verbose "Copied script to VM at: $guestScriptPath"
             
             # Execute the script on the VM with execution policy bypass
-            $powershellPath = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
             $output = Invoke-VMRun -Command "runProgramInGuest" -VMPath $FusionVM.Path -GuestCredential $cred -CommandParameters @($powershellPath, "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", $guestScriptPath)
             
             # Clean up the temporary script file on the VM
@@ -1050,7 +1053,44 @@ try {
                 Write-Verbose "Warning: Could not clean up temporary script files on VM: $($_.Exception.Message)"
             }
             
-            Write-Output $output
+            # Now copy the log file back from the guest to read the output
+            $localLogPath = [System.IO.Path]::GetTempFileName()
+            try {
+                Write-Verbose "Copying output log from guest..."
+                Copy-FileFromFusionVmGuest -FusionVM $FusionVM -GuestFile $guestLogPath -LocalFile $localLogPath -Credential $cred
+                
+                # Read the output
+                if (Test-Path $localLogPath) {
+                    $capturedOutput = Get-Content $localLogPath -Raw
+                    Write-Verbose "Retrieved output from guest log file"
+                    
+                    # Clean up guest log file
+                    try {
+                        $cleanupLogCmd = "Remove-Item -Path '$guestLogPath' -Force -ErrorAction SilentlyContinue"
+                        $cleanupLogScript = "C:\Windows\Temp\CleanupLog_$timestamp.ps1"
+                        $cleanupLogCmd | Out-File -FilePath $localTempScript -Encoding UTF8
+                        Copy-FileToFusionVMGuest -FusionVM $FusionVM -LocalFile $localTempScript -GuestFile $cleanupLogScript -Credential $cred
+                        Invoke-VMRun -Command "runProgramInGuest" -VMPath $FusionVM.Path -GuestCredential $cred -CommandParameters @($powershellPath, "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", $cleanupLogScript)
+                        Write-Verbose "Cleaned up guest log file"
+                    } catch {
+                        Write-Verbose "Warning: Could not clean up guest log file: $($_.Exception.Message)"
+                    }
+                    
+                    # Return the captured output
+                    Write-Output $capturedOutput
+                } else {
+                    Write-Verbose "No output captured from command"
+                }
+            } catch {
+                Write-Verbose "Could not retrieve output log: $($_.Exception.Message)"
+                # Still return the original output if any
+                Write-Output $output
+            } finally {
+                # Clean up local log file
+                if (Test-Path $localLogPath) {
+                    Remove-Item $localLogPath -Force -ErrorAction SilentlyContinue
+                }
+            }
             
         } catch {
             throw "PowerShell execution failed on VM '$($FusionVM.Name)': $($_.Exception.Message)"
