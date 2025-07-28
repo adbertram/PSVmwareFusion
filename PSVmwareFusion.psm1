@@ -1469,3 +1469,179 @@ function Copy-FileFromFusionVmGuest {
     }
 }
 
+function Get-VMIPAddress {
+    <#
+    .SYNOPSIS
+    Gets the IP address of a VM by running ipconfig inside the guest OS.
+    
+    .DESCRIPTION
+    This function runs ipconfig inside a Windows VM guest and parses the output to extract
+    the primary IP address. This is more reliable than vmrun getGuestIPAddress which often
+    fails or hangs, especially in headless mode.
+    
+    .PARAMETER FusionVM
+    VM object from Get-FusionVm or VM name string
+    
+    .PARAMETER Credential
+    PSCredential object for VM guest authentication
+    
+    .PARAMETER AdapterName
+    Optional network adapter name to get IP from (default: gets first IPv4 address)
+    
+    .EXAMPLE
+    Get-VMIPAddress -FusionVM "DEMOVM"
+    
+    .EXAMPLE
+    Get-FusionVm -Name "DEMOVM" | Get-VMIPAddress
+    
+    .EXAMPLE
+    Get-VMIPAddress -FusionVM "DEMOVM" -AdapterName "Ethernet0"
+    #>
+    param(
+        [Parameter(Mandatory, ValueFromPipeline)]
+        [object]$FusionVM,
+        
+        [Parameter()]
+        [PSCredential]$Credential,
+        
+        [Parameter()]
+        [string]$AdapterName
+    )
+    
+    process {
+        # Resolve VM object if string was passed
+        if ($FusionVM -is [string]) {
+            $vmObject = Get-FusionVm -Name $FusionVM | Select-Object -First 1
+            if (-not $vmObject) {
+                throw "VM '$FusionVM' not found"
+            }
+        } else {
+            $vmObject = $FusionVM
+        }
+        
+        # Check if VM is running
+        if ($vmObject.Status -ne "Running") {
+            throw "VM '$($vmObject.Name)' is not running. VM must be running to get IP address."
+        }
+        
+        # Use provided credential or fall back to script scope credential
+        if (-not $Credential) {
+            if (-not $Script:FusionVMCredential) {
+                throw "No credential provided. Use -Credential parameter or call Set-FusionVMCredential first."
+            }
+            $Credential = $Script:FusionVMCredential
+        }
+        
+        Write-Verbose "Getting IP address from VM '$($vmObject.Name)'..."
+        
+        try {
+            # Run ipconfig using the existing PowerShell command function and get all IPv4s
+            $psCommand = @'
+$ips = Get-NetIPAddress -AddressFamily IPv4 | Where-Object { 
+    $_.IPAddress -notlike "127.*" -and 
+    $_.IPAddress -notlike "169.254.*" -and
+    $_.InterfaceAlias -notlike "*Loopback*"
+} | Select-Object -ExpandProperty IPAddress
+if ($ips) {
+    $ips -join ","
+} else {
+    # Fallback to ipconfig parsing
+    $output = ipconfig
+    $matches = [regex]::Matches($output, 'IPv4 Address[^:]*:\s*([\d\.]+)')
+    $validIPs = $matches | ForEach-Object { $_.Groups[1].Value } | Where-Object { $_ -notlike "169.254.*" }
+    if ($validIPs) {
+        $validIPs[0]
+    } else {
+        "NO_VALID_IP"
+    }
+}
+'@
+            $result = Invoke-FusionVMGuestPowerShellCommand -FusionVM $vmObject -Command $psCommand -Credential $Credential
+            
+            if ($result -and $result -ne "NO_VALID_IP") {
+                # If multiple IPs, take the first one
+                $ipAddress = ($result -split ',')[0].Trim()
+                Write-Verbose "Found IP address: $ipAddress"
+                return $ipAddress
+            } else {
+                throw "No valid IP address found"
+            }
+            
+        } catch {
+            throw "Failed to get IP address from VM '$($vmObject.Name)': $($_.Exception.Message)"
+        }
+    }
+}
+
+function Restart-FusionVM {
+    <#
+    .SYNOPSIS
+    Restarts a VMware Fusion virtual machine and waits for VMware Tools to be available.
+    
+    .DESCRIPTION
+    This function gracefully stops a VM, starts it again, and then waits for VMware Tools
+    to be running before returning. This ensures the VM is fully ready for operations.
+    
+    .PARAMETER FusionVM
+    A FusionVM object or VM name to restart
+    
+    .PARAMETER MaxWaitMinutes
+    Maximum time to wait for the VM to be ready after restart (default: 5 minutes)
+    
+    .EXAMPLE
+    Restart-FusionVM -FusionVM "DEMOVM"
+    
+    .EXAMPLE
+    Get-FusionVm -Name "TestVM" | Restart-FusionVM
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory, ValueFromPipeline)]
+        [PSCustomObject]$FusionVM,
+        
+        [Parameter()]
+        [int]$MaxWaitMinutes = 5
+    )
+    
+    process {
+        # Resolve VM object if name was provided
+        if ($FusionVM -is [string]) {
+            $vmObject = Get-FusionVm -Name $FusionVM
+            if (-not $vmObject) {
+                throw "VM '$FusionVM' not found"
+            }
+        } else {
+            $vmObject = $FusionVM
+        }
+        
+        Write-Verbose "Restarting VM '$($vmObject.Name)'"
+        
+        # Stop the VM using existing function
+        try {
+            if ($vmObject.Status -eq "Running") {
+                Write-Verbose "Stopping VM '$($vmObject.Name)'..."
+                Stop-FusionVm -FusionVM $vmObject
+                
+                # Wait a moment for the VM to fully stop
+                Start-Sleep -Seconds 3
+            } else {
+                Write-Verbose "VM '$($vmObject.Name)' is already stopped"
+            }
+        } catch {
+            throw "Failed to stop VM '$($vmObject.Name)': $($_.Exception.Message)"
+        }
+        
+        # Start the VM using existing function (which includes Wait-FusionVmReady)
+        try {
+            Write-Verbose "Starting VM '$($vmObject.Name)'..."
+            Start-FusionVm -FusionVM $vmObject
+            Write-Verbose "VM '$($vmObject.Name)' has been restarted and is ready"
+        } catch {
+            throw "Failed to start VM '$($vmObject.Name)': $($_.Exception.Message)"
+        }
+        
+        # Return the updated VM object
+        Get-FusionVm -Name $vmObject.Name
+    }
+}
+
