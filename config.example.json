@@ -1,0 +1,33 @@
+{
+  "vmCredentials": {
+    "default": {
+      "guestUsername": "your-default-username",
+      "guestPassword": "your-default-password"
+    },
+    "byVMName": {
+      "ExampleVM1": {
+        "guestUsername": "specific-username-for-vm1",
+        "guestPassword": "specific-password-for-vm1"
+      },
+      "ExampleVM2": {
+        "guestUsername": "specific-username-for-vm2",
+        "guestPassword": "specific-password-for-vm2"
+      }
+    }
+  },
+  "vmEncryption": {
+    "default": {
+      "encryptionPassword": "your-default-encryption-password"
+    },
+    "byVMPath": {
+      "/Users/username/Virtual Machines.localized/MyEncryptedVM.vmwarevm/MyEncryptedVM.vmx": {
+        "encryptionPassword": "specific-encryption-password"
+      }
+    },
+    "byVMName": {
+      "MyEncryptedVM": {
+        "encryptionPassword": "encryption-password-by-name"
+      }
+    }
+  }
+}

@@ -1,0 +1,13 @@
+# Configuration files with sensitive data
+config.json
+
+# macOS system files
+.DS_Store
+
+# PowerShell module output
+*.psd1.bak
+*.psm1.bak
+
+# Temporary files
+*.tmp
+*.temp

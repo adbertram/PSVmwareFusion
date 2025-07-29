@@ -4,6 +4,9 @@ $ErrorActionPreference = "Stop"
 # Script scope credential for VM guest authentication
 $Script:FusionVMCredential = $null
 
+# Script scope storage for VM encryption passwords
+$Script:FusionVMEncryptionPasswords = @{}
+
 # Default output directory for command results
 $OUTPUT_DIR = "$HOME/.vm_command_results"
 
@@ -204,6 +207,71 @@ function Invoke-VMRun {
     # VMware Fusion vmrun path
     $vmRunPath = "/Applications/VMware Fusion.app/Contents/Public/vmrun"
     
+    # Get configuration if available
+    $config = Get-FusionVMConfig
+    
+    # Handle VixPassword (encryption password) with config defaults
+    if (-not $VixPassword -and $config -and $config.vmEncryption) {
+        # Extract VM name from path if available
+        $vmName = if ($VMPath) {
+            $vmFile = Split-Path -Leaf $VMPath
+            $vmName = [System.IO.Path]::GetFileNameWithoutExtension($vmFile)
+            $vmName
+        }
+        
+        # Check for VM-specific encryption password by path
+        if ($VMPath -and $config.vmEncryption.byVMPath -and $config.vmEncryption.byVMPath.$VMPath) {
+            $encryptionPass = $config.vmEncryption.byVMPath.$VMPath.encryptionPassword
+            if ($encryptionPass) {
+                $VixPassword = ConvertTo-SecureString $encryptionPass -AsPlainText -Force
+                Write-Verbose "Using VM-specific encryption password from config for path: $VMPath"
+            }
+        }
+        # Check for VM-specific encryption password by name
+        elseif ($vmName -and $config.vmEncryption.byVMName -and $config.vmEncryption.byVMName.$vmName) {
+            $encryptionPass = $config.vmEncryption.byVMName.$vmName.encryptionPassword
+            if ($encryptionPass) {
+                $VixPassword = ConvertTo-SecureString $encryptionPass -AsPlainText -Force
+                Write-Verbose "Using VM-specific encryption password from config for VM: $vmName"
+            }
+        }
+        # Use default encryption password
+        elseif ($config.vmEncryption.default -and $config.vmEncryption.default.encryptionPassword) {
+            $encryptionPass = $config.vmEncryption.default.encryptionPassword
+            if ($encryptionPass) {
+                $VixPassword = ConvertTo-SecureString $encryptionPass -AsPlainText -Force
+                Write-Verbose "Using default encryption password from config"
+            }
+        }
+    }
+    
+    # Handle GuestCredential with config defaults
+    if (-not $GuestCredential -and $config -and $config.vmCredentials) {
+        # Extract VM name from path if available
+        $vmName = if ($VMPath) {
+            $vmFile = Split-Path -Leaf $VMPath
+            $vmName = [System.IO.Path]::GetFileNameWithoutExtension($vmFile)
+            $vmName
+        }
+        
+        # Check for VM-specific credentials
+        if ($vmName -and $config.vmCredentials.byVMName -and $config.vmCredentials.byVMName.$vmName) {
+            $vmCred = $config.vmCredentials.byVMName.$vmName
+            if ($vmCred.guestUsername -and $vmCred.guestPassword) {
+                $securePass = ConvertTo-SecureString $vmCred.guestPassword -AsPlainText -Force
+                $GuestCredential = New-Object PSCredential($vmCred.guestUsername, $securePass)
+                Write-Verbose "Using VM-specific guest credentials from config for VM: $vmName"
+            }
+        }
+        # Use default credentials
+        elseif ($config.vmCredentials.default -and $config.vmCredentials.default.guestUsername -and $config.vmCredentials.default.guestPassword) {
+            $defaultCred = $config.vmCredentials.default
+            $securePass = ConvertTo-SecureString $defaultCred.guestPassword -AsPlainText -Force
+            $GuestCredential = New-Object PSCredential($defaultCred.guestUsername, $securePass)
+            Write-Verbose "Using default guest credentials from config"
+        }
+    }
+    
     # Build final arguments array from parameters
     $finalArguments = @()
     
@@ -312,8 +380,18 @@ function Invoke-VMRun {
         
         Write-Verbose "Executing vmrun with arguments: $($safeArgs -join ' ')"
 
+        # Check if this is a cleanup operation that might produce "Access is denied"
+        if ($Command -eq "runProgramInGuest" -and $CommandParameters -match "Remove-Item|del|delete") {
+            Write-Verbose "Executing cleanup operation: $($CommandParameters -join ' ')"
+        }
+
         $output = & $vmRunPath @finalArguments 2>&1
         $exitCode = $LASTEXITCODE
+        
+        # Check for specific error messages in output
+        if ($output -match "Access is denied") {
+            Write-Verbose "Access denied error detected for command: $Command with parameters: $($CommandParameters -join ' ')"
+        }
         
         if ($exitCode -ne 0) {
             $errorMsg = "vmrun command failed with exit code $exitCode"
@@ -364,6 +442,64 @@ function ConvertFrom-SecureStringToPlainText {
     }
 }
 
+# Function to get configuration from config.json
+function Get-FusionVMConfig {
+    <#
+    .SYNOPSIS
+    Gets VM configuration from config.json file including credentials and encryption passwords.
+    
+    .DESCRIPTION
+    Reads the config.json file from the module directory and returns configuration
+    for VM credentials and encryption passwords. Returns null if config file doesn't exist.
+    
+    .EXAMPLE
+    $config = Get-FusionVMConfig
+    
+    .EXAMPLE
+    # Get config and use it to set credentials
+    $config = Get-FusionVMConfig
+    if ($config -and $config.vmCredentials.default) {
+        $securePass = ConvertTo-SecureString $config.vmCredentials.default.guestPassword -AsPlainText -Force
+        $cred = New-Object PSCredential($config.vmCredentials.default.guestUsername, $securePass)
+        Set-FusionVMCredential -Credential $cred
+    }
+    #>
+    
+    # Get the module path
+    $modulePath = $PSScriptRoot
+    if (-not $modulePath) {
+        # Try to get from module info
+        $module = Get-Module PSVmwareFusion
+        if ($module) {
+            $modulePath = Split-Path -Parent $module.Path
+        } else {
+            # Fallback to the directory where this script is located
+            $modulePath = Split-Path -Parent $MyInvocation.MyCommand.Path
+        }
+    }
+    
+    $configPath = Join-Path $modulePath "config.json"
+    
+    # Check if config file exists
+    if (-not (Test-Path $configPath)) {
+        Write-Verbose "Config file not found at: $configPath"
+        return $null
+    }
+    
+    try {
+        # Read and parse the JSON config
+        $configContent = Get-Content -Path $configPath -Raw
+        $config = $configContent | ConvertFrom-Json
+        
+        Write-Verbose "Configuration loaded from: $configPath"
+        return $config
+        
+    } catch {
+        Write-Warning "Failed to read or parse config.json: $($_.Exception.Message)"
+        return $null
+    }
+}
+
 # Function to set script-level credential for VM guest authentication
 function Set-FusionVMCredential {
     <#
@@ -394,6 +530,68 @@ function Set-FusionVMCredential {
     Write-Verbose "VM guest credential set for user: $($Credential.UserName)"
 }
 
+# Helper function to get credentials with config fallback
+function Get-FusionVMCredentialWithFallback {
+    <#
+    .SYNOPSIS
+    Internal helper to get VM credentials with fallback to config file.
+    
+    .DESCRIPTION
+    Gets credentials in order of priority:
+    1. Provided credential parameter
+    2. Script-scoped credential
+    3. Config file credential (VM-specific or default)
+    
+    .PARAMETER Credential
+    Optional credential parameter
+    
+    .PARAMETER VMName
+    Optional VM name for VM-specific config lookup
+    #>
+    param(
+        [Parameter()]
+        [PSCredential]$Credential,
+        
+        [Parameter()]
+        [string]$VMName
+    )
+    
+    # Return provided credential if available
+    if ($Credential) {
+        return $Credential
+    }
+    
+    # Return script-scoped credential if available
+    if ($Script:FusionVMCredential) {
+        return $Script:FusionVMCredential
+    }
+    
+    # Try to get from config
+    $config = Get-FusionVMConfig
+    if ($config -and $config.vmCredentials) {
+        # Check for VM-specific credentials
+        if ($VMName -and $config.vmCredentials.byVMName -and $config.vmCredentials.byVMName.$VMName) {
+            $vmCred = $config.vmCredentials.byVMName.$VMName
+            if ($vmCred.guestUsername -and $vmCred.guestPassword) {
+                $securePass = ConvertTo-SecureString $vmCred.guestPassword -AsPlainText -Force
+                Write-Verbose "Using VM-specific guest credentials from config for VM: $VMName"
+                return New-Object PSCredential($vmCred.guestUsername, $securePass)
+            }
+        }
+        
+        # Use default credentials
+        if ($config.vmCredentials.default -and $config.vmCredentials.default.guestUsername -and $config.vmCredentials.default.guestPassword) {
+            $defaultCred = $config.vmCredentials.default
+            $securePass = ConvertTo-SecureString $defaultCred.guestPassword -AsPlainText -Force
+            Write-Verbose "Using default guest credentials from config"
+            return New-Object PSCredential($defaultCred.guestUsername, $securePass)
+        }
+    }
+    
+    # No credentials found
+    return $null
+}
+
 # Function to check the current credential status
 function Get-FusionVMCredential {
     <#
@@ -421,6 +619,34 @@ function Get-FusionVMCredential {
 
 # Function to get Fusion VMs and their status
 function Get-FusionVm {
+    <#
+    .SYNOPSIS
+    Gets VMware Fusion virtual machines.
+    
+    .DESCRIPTION
+    Retrieves information about VMware Fusion VMs including their status.
+    If you have encrypted VMs and don't want to be prompted for passwords,
+    use the -SkipStatusCheck parameter.
+    
+    .PARAMETER VMName
+    Optional VM name filter
+    
+    .PARAMETER Status
+    Filter VMs by status (Running, Stopped, Unknown)
+    
+    .PARAMETER SkipStatusCheck
+    Skip checking VM running status. Useful when you have encrypted VMs
+    and don't want to be prompted for encryption passwords.
+    
+    .EXAMPLE
+    Get-FusionVm
+    
+    .EXAMPLE
+    Get-FusionVm -Name "TestVM"
+    
+    .EXAMPLE
+    Get-FusionVm -SkipStatusCheck
+    #>
     param(
         [Parameter(Mandatory = $false)]
         [Alias("Name")]
@@ -428,7 +654,10 @@ function Get-FusionVm {
         
         [Parameter(Mandatory = $false)]
         [ValidateSet("Running", "Stopped", "Unknown")]
-        [string]$Status
+        [string]$Status,
+        
+        [Parameter()]
+        [switch]$SkipStatusCheck
     )
 
     $vmFolderPath = "$HOME/Virtual Machines.localized"
@@ -454,11 +683,21 @@ function Get-FusionVm {
     }
     
     # Get list of running VMs
-    $RunningVMs = $null
-    try {
-        $RunningVMs = Invoke-VMRun -Command "list"
-    } catch {
-        throw "Error getting running VMs: $($_.Exception.Message)"
+    $RunningVMs = @()
+    if (-not $SkipStatusCheck) {
+        try {
+            # Note: The "list" command may prompt for encryption passwords if encrypted VMs are present
+            # This is a limitation of vmrun - it cannot use -vp flag with the list command
+            $RunningVMs = Invoke-VMRun -Command "list"
+        } catch {
+            # If we fail to get running VMs (possibly due to encryption), continue without status info
+            Write-Warning "Could not get list of running VMs. This may happen if you have encrypted VMs. Error: $($_.Exception.Message)"
+            Write-Warning "VM status will be shown as 'Unknown' for all VMs."
+            Write-Warning "Use -SkipStatusCheck parameter to avoid this prompt."
+            $RunningVMs = @()
+        }
+    } else {
+        Write-Verbose "Skipping VM status check as requested"
     }
     
     # Display VM information
@@ -972,10 +1211,10 @@ function Invoke-FusionVMGuestPowerShellCommand {
             throw "VM '$($FusionVM.Name)' is not running"
         }
         
-        # Get credential
-        $cred = if ($Credential) { $Credential } else { $Script:FusionVMCredential }
+        # Get credential with config fallback
+        $cred = Get-FusionVMCredentialWithFallback -Credential $Credential -VMName $FusionVM.Name
         if (-not $cred) {
-            throw "No credential provided. Use -Credential parameter or call Set-FusionVMCredential first."
+            throw "No credential provided. Use -Credential parameter, call Set-FusionVMCredential, or configure credentials in config.json"
         }
         
         # Determine PowerShell executable path
@@ -1153,12 +1392,10 @@ function Invoke-FusionVMGuestScript {
             throw "Script '$ScriptPath' not found"
         }
         
-        # Use provided credential or fall back to script scope credential
+        # Get credential with config fallback
+        $Credential = Get-FusionVMCredentialWithFallback -Credential $Credential -VMName $FusionVM.Name
         if (-not $Credential) {
-            if (-not $Script:FusionVMCredential) {
-                throw "No credential provided. Use -Credential parameter or call Set-FusionVMCredential first."
-            }
-            $Credential = $Script:FusionVMCredential
+            throw "No credential provided. Use -Credential parameter, call Set-FusionVMCredential, or configure credentials in config.json"
         }
         
         Write-Verbose "Copying script '$ScriptPath' to VM and executing..."
@@ -1174,12 +1411,12 @@ function Invoke-FusionVMGuestScript {
             
             # Execute the script on the VM with execution policy bypass
             $executeCommand = "Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force; & '$guestScriptPath'"
-            $output = Invoke-FusionVMGuestPowerShellCommand -FusionVM $FusionVM -Command $executeCommand -Credential $Credential -LogFilePath $LogFilePath
+            $output = Invoke-FusionVMGuestPowerShellCommand -FusionVM $FusionVM -Command $executeCommand -Credential $Credential -LogFilePath $LogFilePath -UsePwsh
             
             # Clean up the temporary script file
             try {
                 $cleanupCommand = "Remove-Item -Path '$guestScriptPath' -Force -ErrorAction SilentlyContinue"
-                Invoke-FusionVMGuestPowerShellCommand -FusionVM $FusionVM -Command $cleanupCommand -Credential $Credential
+                Invoke-FusionVMGuestPowerShellCommand -FusionVM $FusionVM -Command $cleanupCommand -Credential $Credential -UsePwsh
                 Write-Verbose "Cleaned up temporary script file: $guestScriptPath"
             } catch {
                 Write-Verbose "Warning: Could not clean up temporary script file: $($_.Exception.Message)"
@@ -1191,7 +1428,7 @@ function Invoke-FusionVMGuestScript {
             # Try to clean up on error
             try {
                 $cleanupCommand = "Remove-Item -Path '$guestScriptPath' -Force -ErrorAction SilentlyContinue"
-                Invoke-FusionVMGuestPowerShellCommand -FusionVM $FusionVM -Command $cleanupCommand -Credential $Credential
+                Invoke-FusionVMGuestPowerShellCommand -FusionVM $FusionVM -Command $cleanupCommand -Credential $Credential -UsePwsh
             } catch {
                 # Ignore cleanup errors during error handling
             }
@@ -1264,12 +1501,10 @@ function Copy-FileToFusionVMGuest {
             throw "VM '$($vmObject.Name)' is not running"
         }
         
-        # Use provided credential or fall back to script scope credential
+        # Get credential with config fallback
+        $Credential = Get-FusionVMCredentialWithFallback -Credential $Credential -VMName $vmObject.Name
         if (-not $Credential) {
-            if (-not $Script:FusionVMCredential) {
-                throw "No credential provided. Use -Credential parameter or call Set-FusionVMCredential first."
-            }
-            $Credential = $Script:FusionVMCredential
+            throw "No credential provided. Use -Credential parameter, call Set-FusionVMCredential, or configure credentials in config.json"
         }
         
         Write-Verbose "Copying file '$LocalFile' to VM '$($vmObject.Name)' at '$GuestFile'..."
@@ -1343,12 +1578,10 @@ function Get-FusionVmScreenshot {
             throw "VM '$($vmObject.Name)' is not running. Screenshots can only be taken from running VMs."
         }
         
-        # Use provided credential or fall back to script scope credential
+        # Get credential with config fallback
+        $Credential = Get-FusionVMCredentialWithFallback -Credential $Credential -VMName $vmObject.Name
         if (-not $Credential) {
-            if (-not $Script:FusionVMCredential) {
-                throw "No credential provided. Use -Credential parameter or call Set-FusionVMCredential first."
-            }
-            $Credential = $Script:FusionVMCredential
+            throw "No credential provided. Use -Credential parameter, call Set-FusionVMCredential, or configure credentials in config.json"
         }
         
         Write-Verbose "Capturing screenshot of VM '$($vmObject.Name)' to '$OutputPath'..."
@@ -1442,12 +1675,10 @@ function Copy-FileFromFusionVmGuest {
             throw "VM '$($vmObject.Name)' is not running"
         }
         
-        # Use provided credential or fall back to script scope credential
+        # Get credential with config fallback
+        $Credential = Get-FusionVMCredentialWithFallback -Credential $Credential -VMName $vmObject.Name
         if (-not $Credential) {
-            if (-not $Script:FusionVMCredential) {
-                throw "No credential provided. Use -Credential parameter or call Set-FusionVMCredential first."
-            }
-            $Credential = $Script:FusionVMCredential
+            throw "No credential provided. Use -Credential parameter, call Set-FusionVMCredential, or configure credentials in config.json"
         }
         
         Write-Verbose "Copying file '$GuestFile' from VM '$($vmObject.Name)' to '$LocalFile'..."
@@ -1524,12 +1755,10 @@ function Get-VMIPAddress {
             throw "VM '$($vmObject.Name)' is not running. VM must be running to get IP address."
         }
         
-        # Use provided credential or fall back to script scope credential
+        # Get credential with config fallback
+        $Credential = Get-FusionVMCredentialWithFallback -Credential $Credential -VMName $vmObject.Name
         if (-not $Credential) {
-            if (-not $Script:FusionVMCredential) {
-                throw "No credential provided. Use -Credential parameter or call Set-FusionVMCredential first."
-            }
-            $Credential = $Script:FusionVMCredential
+            throw "No credential provided. Use -Credential parameter, call Set-FusionVMCredential, or configure credentials in config.json"
         }
         
         Write-Verbose "Getting IP address from VM '$($vmObject.Name)'..."
